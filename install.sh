@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # QuikeFix Wazuh Agent Universal Installer - Linux
-# Repository: quikefix/quikefix-wazuh-agent-installer
+# Secure Private Edition
 #
 
 set -u
@@ -14,258 +14,284 @@ set -o pipefail
 WAZUH_MANAGER="${WAZUH_MANAGER:-wazuh-agent.quikefix.info}"
 WAZUH_AGENT_NAME="${WAZUH_AGENT_NAME:-$(hostname -s 2>/dev/null || hostname)}"
 
+# PRIVATE REPOSITORY ONLY.
+# Replace the placeholder below with the enrollment password stored in:
+# /var/ossec/etc/authd.pass
+WAZUH_ENROLLMENT_PASSWORD="${WAZUH_ENROLLMENT_PASSWORD:-FcD09z0XRQKt0ucDMRvMhdFuqyEuwXG75HDFD+nBqyc=}"
+
 WAZUH_REPO="https://packages.wazuh.com/4.x/apt/"
 WAZUH_KEY_URL="https://packages.wazuh.com/key/GPG-KEY-WAZUH"
 
 LOG_FILE="/var/log/quikefix-wazuh-install.log"
 OSSEC_CONF="/var/ossec/etc/ossec.conf"
 OSSEC_LOG="/var/ossec/logs/ossec.log"
+CLIENT_KEYS="/var/ossec/etc/client.keys"
 
-PLAN_USED="None"
-
-# Connection verification
 CONNECTION_WAIT="${CONNECTION_WAIT:-60}"
 CONNECTION_INTERVAL=5
 
+INSTALL_METHOD="None"
+CONNECTION_STATE="NO"
+SERVICE_STATE="unknown"
+MANAGER_IP="Unknown"
+OSSEC_LOG_START_LINE=0
+
 # ============================================================
-# OUTPUT
+# OUTPUT FUNCTIONS
 # ============================================================
 
-green='\033[0;32m'
-yellow='\033[1;33m'
-red='\033[0;31m'
-blue='\033[0;34m'
-reset='\033[0m'
+log()
+{
+    local level="$1"
+    shift
+    local message="$*"
 
-log() {
-    echo -e "$*" | tee -a "$LOG_FILE"
+    printf '[%s] %s\n' "$level" "$message"
+
+    if [ -n "${LOG_FILE:-}" ]; then
+        printf '%s [%s] %s\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" \
+            "$level" \
+            "$message" \
+            >>"$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
-ok() {
-    log "${green}[PASS]${reset} $*"
+info()
+{
+    log "INFO" "$@"
 }
 
-warn() {
-    log "${yellow}[WARN]${reset} $*"
+pass()
+{
+    log "PASS" "$@"
 }
 
-fail() {
-    log "${red}[FAIL]${reset} $*"
+warn()
+{
+    log "WARN" "$@"
 }
 
-info() {
-    log "${blue}[INFO]${reset} $*"
+fail()
+{
+    log "FAIL" "$@"
 }
+
+separator()
+{
+    echo "============================================================"
+}
+
+# ============================================================
+# HEADER
+# ============================================================
+
+separator
+echo " QUIKEFIX WAZUH AGENT INSTALLER"
+separator
+echo "Started      : $(date)"
+echo "Hostname     : $(hostname -f 2>/dev/null || hostname)"
+echo "Agent Name   : $WAZUH_AGENT_NAME"
+echo "Manager      : $WAZUH_MANAGER"
+separator
 
 # ============================================================
 # ROOT CHECK
 # ============================================================
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo "ERROR: Run this installer as root or with sudo."
+    echo
+    echo "[FAIL] Root privileges are required."
+    echo
+    echo "Run using:"
+    echo "sudo bash install.sh"
     exit 1
 fi
 
 touch "$LOG_FILE" 2>/dev/null || {
-    echo "Unable to create $LOG_FILE"
+    echo "[FAIL] Unable to create $LOG_FILE"
     exit 1
 }
 
-log ""
-log "============================================================"
-log " QUIKEFIX WAZUH AGENT INSTALLER"
-log "============================================================"
-log "Started      : $(date)"
-log "Hostname     : $(hostname)"
-log "Agent Name   : $WAZUH_AGENT_NAME"
-log "Manager      : $WAZUH_MANAGER"
-log "============================================================"
+chmod 600 "$LOG_FILE" 2>/dev/null || true
 
 # ============================================================
-# OS DETECTION
+# OPERATING SYSTEM DETECTION
 # ============================================================
 
-if [ ! -r /etc/os-release ]; then
-    fail "Cannot determine Linux distribution."
+if [ ! -f /etc/os-release ]; then
+    fail "Unable to identify the operating system."
     exit 1
 fi
 
+# shellcheck disable=SC1091
 . /etc/os-release
 
+OS_NAME="${PRETTY_NAME:-${NAME:-Unknown}}"
 OS_ID="${ID:-unknown}"
-OS_VERSION="${VERSION_ID:-unknown}"
+OS_LIKE="${ID_LIKE:-}"
 ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
 
-info "Operating system: ${PRETTY_NAME:-$OS_ID}"
+info "Operating system: $OS_NAME"
 info "Architecture: $ARCH"
 
 case "$OS_ID" in
     ubuntu|debian)
-        ok "Supported Debian-family operating system detected."
+        pass "Supported Debian-family operating system detected."
         ;;
     *)
-        fail "V1 currently supports Ubuntu and Debian."
-        fail "Detected: $OS_ID $OS_VERSION"
-        exit 1
+        if echo "$OS_LIKE" | grep -qi "debian"; then
+            pass "Supported Debian-family operating system detected."
+        else
+            fail "This version currently supports Debian/Ubuntu-family Linux."
+            exit 1
+        fi
         ;;
 esac
 
 # ============================================================
-# REQUIRED COMMANDS / PACKAGES
+# PREREQUISITES
 # ============================================================
 
 info "Checking prerequisites..."
 
 export DEBIAN_FRONTEND=noninteractive
 
-apt-get update >>"$LOG_FILE" 2>&1 || \
-    warn "Initial apt update returned an error."
+apt-get update -qq >>"$LOG_FILE" 2>&1 || {
+    fail "apt package index update failed."
+    exit 1
+}
 
-REQUIRED_PACKAGES=(
-    curl
-    ca-certificates
-    gnupg
-    netcat-openbsd
-)
+install_prerequisite()
+{
+    local package="$1"
+    local command_name="${2:-$1}"
 
-for package in "${REQUIRED_PACKAGES[@]}"; do
-
-    if dpkg-query -W -f='${Status}' "$package" 2>/dev/null |
-       grep -q "install ok installed"; then
-
-        ok "$package already installed."
-
-    else
-
-        info "Installing prerequisite: $package"
-
-        if apt-get install -y "$package" >>"$LOG_FILE" 2>&1; then
-            ok "$package installed."
-        else
-            fail "Could not install prerequisite: $package"
-            exit 1
-        fi
-
+    if command -v "$command_name" >/dev/null 2>&1; then
+        pass "$package already installed."
+        return 0
     fi
 
-done
+    info "Installing prerequisite: $package"
+
+    if apt-get install -y "$package" >>"$LOG_FILE" 2>&1; then
+        pass "$package installed."
+    else
+        fail "Unable to install prerequisite: $package"
+        exit 1
+    fi
+}
+
+install_prerequisite "curl" "curl"
+install_prerequisite "ca-certificates" "update-ca-certificates"
+install_prerequisite "gnupg" "gpg"
+install_prerequisite "netcat-openbsd" "nc"
 
 # ============================================================
-# DNS TEST
+# DNS CHECK
 # ============================================================
 
 info "Testing manager DNS..."
 
-if getent ahostsv4 "$WAZUH_MANAGER" >/dev/null 2>&1; then
+MANAGER_IP="$(
+    getent ahostsv4 "$WAZUH_MANAGER" 2>/dev/null |
+    awk 'NR==1 {print $1}'
+)"
 
-    MANAGER_IP="$(
-        getent ahostsv4 "$WAZUH_MANAGER" |
-        awk 'NR==1 {print $1}'
-    )"
-
-    ok "$WAZUH_MANAGER resolves to $MANAGER_IP"
-
-else
-
+if [ -z "$MANAGER_IP" ]; then
     fail "DNS resolution failed for $WAZUH_MANAGER"
     exit 1
-
 fi
+
+pass "$WAZUH_MANAGER resolves to $MANAGER_IP"
 
 # ============================================================
-# NETWORK TEST
+# NETWORK CHECKS
 # ============================================================
 
-test_port() {
-
-    local port="$1"
-
-    if nc -z -w5 "$WAZUH_MANAGER" "$port" >/dev/null 2>&1; then
-        ok "TCP $port reachable."
-        return 0
-    else
-        warn "TCP $port is not currently reachable."
-        return 1
-    fi
-}
-
-PORT_1514_OK="NO"
-PORT_1515_OK="NO"
-
-if test_port 1514; then
-    PORT_1514_OK="YES"
-fi
-
-if test_port 1515; then
-    PORT_1515_OK="YES"
-fi
-
-# 1514 is required for normal agent communication.
-if [ "$PORT_1514_OK" != "YES" ]; then
-    fail "Manager communication port TCP 1514 is unreachable."
-    fail "Cannot continue safely."
+if nc -z -w5 "$WAZUH_MANAGER" 1514 >/dev/null 2>&1; then
+    pass "TCP 1514 reachable."
+else
+    fail "TCP 1514 is unreachable."
+    fail "Agent communication cannot continue."
     exit 1
 fi
 
-# 1515 is normally required for first-time enrollment.
-if [ "$PORT_1515_OK" != "YES" ]; then
-    warn "Enrollment port TCP 1515 is unreachable."
-    warn "An existing enrolled agent may still be able to connect."
+if nc -z -w5 "$WAZUH_MANAGER" 1515 >/dev/null 2>&1; then
+    pass "TCP 1515 reachable."
+else
+    warn "TCP 1515 enrollment port is unreachable."
+
+    if [ ! -s "$CLIENT_KEYS" ]; then
+        fail "This machine is not enrolled and TCP 1515 is required."
+        exit 1
+    fi
+
+    warn "Existing enrollment key detected; continuing."
 fi
 
 # ============================================================
-# EXISTING AGENT
+# EXISTING INSTALLATION CHECK
 # ============================================================
-
-AGENT_ALREADY_INSTALLED="NO"
 
 if dpkg-query -W -f='${Status}' wazuh-agent 2>/dev/null |
-   grep -q "install ok installed"; then
-
-    AGENT_ALREADY_INSTALLED="YES"
-    ok "Existing Wazuh agent detected."
-
+    grep -q "install ok installed"
+then
+    pass "Existing Wazuh agent detected."
+    INSTALL_METHOD="Existing installation"
 else
-
     info "Wazuh agent is not currently installed."
-
 fi
 
 # ============================================================
-# PLAN A
-# OFFICIAL WAZUH APT REPOSITORY
+# REPOSITORY SETUP
 # ============================================================
 
-install_plan_a() {
-
-    info "PLAN A: Installing through official Wazuh repository."
+setup_wazuh_repository()
+{
+    info "Configuring official Wazuh repository."
 
     mkdir -p /usr/share/keyrings
 
-    rm -f /usr/share/keyrings/wazuh.gpg.tmp
+    rm -f /usr/share/keyrings/wazuh.gpg
 
     if ! curl -fsSL "$WAZUH_KEY_URL" |
-         gpg --dearmor --yes \
-         -o /usr/share/keyrings/wazuh.gpg >>"$LOG_FILE" 2>&1; then
-
-        warn "PLAN A: Unable to install Wazuh signing key."
+        gpg --dearmor --yes \
+            -o /usr/share/keyrings/wazuh.gpg \
+            >>"$LOG_FILE" 2>&1
+    then
+        warn "Unable to install Wazuh repository signing key."
         return 1
-
     fi
 
-    echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] $WAZUH_REPO stable main" \
-        > /etc/apt/sources.list.d/wazuh.list
+    cat >/etc/apt/sources.list.d/wazuh.list <<EOF
+deb [signed-by=/usr/share/keyrings/wazuh.gpg] $WAZUH_REPO stable main
+EOF
 
     if ! apt-get update >>"$LOG_FILE" 2>&1; then
-        warn "PLAN A: Repository update failed."
+        warn "Wazuh repository update failed."
         return 1
     fi
+
+    return 0
+}
+
+# ============================================================
+# PLAN A - OFFICIAL REPOSITORY
+# ============================================================
+
+install_plan_a()
+{
+    info "PLAN A: Installing through official Wazuh repository."
+
+    setup_wazuh_repository || return 1
 
     if WAZUH_MANAGER="$WAZUH_MANAGER" \
        WAZUH_AGENT_NAME="$WAZUH_AGENT_NAME" \
-       apt-get install -y wazuh-agent >>"$LOG_FILE" 2>&1; then
-
-        PLAN_USED="Plan A - Official repository"
+       apt-get install -y wazuh-agent >>"$LOG_FILE" 2>&1
+    then
+        INSTALL_METHOD="Plan A - Official repository"
+        pass "Wazuh agent installed through official repository."
         return 0
     fi
 
@@ -274,29 +300,25 @@ install_plan_a() {
 }
 
 # ============================================================
-# PLAN B
-# REPAIR PACKAGE STATE + RETRY
+# PLAN B - PACKAGE REPAIR / REINSTALL
 # ============================================================
 
-install_plan_b() {
-
-    info "PLAN B: Repairing package manager and retrying."
+install_plan_b()
+{
+    info "PLAN B: Repairing package state and retrying installation."
 
     dpkg --configure -a >>"$LOG_FILE" 2>&1 || true
-
     apt-get -f install -y >>"$LOG_FILE" 2>&1 || true
 
-    apt-get clean >>"$LOG_FILE" 2>&1 || true
-
-    rm -rf /var/lib/apt/lists/partial/* 2>/dev/null || true
-
-    apt-get update >>"$LOG_FILE" 2>&1 || true
+    setup_wazuh_repository || true
 
     if WAZUH_MANAGER="$WAZUH_MANAGER" \
        WAZUH_AGENT_NAME="$WAZUH_AGENT_NAME" \
-       apt-get install --reinstall -y wazuh-agent >>"$LOG_FILE" 2>&1; then
-
-        PLAN_USED="Plan B - Package repair/reinstall"
+       apt-get install --reinstall -y wazuh-agent \
+       >>"$LOG_FILE" 2>&1
+    then
+        INSTALL_METHOD="Plan B - Package repair"
+        pass "Wazuh agent installed using repair/reinstall."
         return 0
     fi
 
@@ -305,16 +327,16 @@ install_plan_b() {
 }
 
 # ============================================================
-# PLAN C
-# DIRECT PACKAGE RETRIEVAL
+# PLAN C - DIRECT PACKAGE RETRIEVAL
 # ============================================================
 
-install_plan_c() {
+install_plan_c()
+{
+    info "PLAN C: Attempting direct Wazuh package installation."
 
-    info "PLAN C: Attempting direct package retrieval."
+    setup_wazuh_repository || true
 
     local package_url
-    local temp_deb="/tmp/quikefix-wazuh-agent.deb"
 
     package_url="$(
         apt-get --print-uris --yes install wazuh-agent 2>/dev/null |
@@ -324,126 +346,209 @@ install_plan_c() {
     )"
 
     if [ -z "$package_url" ]; then
-        warn "PLAN C: Could not determine Wazuh package URL."
+        warn "Unable to determine direct Wazuh package URL."
         return 1
     fi
 
-    info "PLAN C: Downloading Wazuh package."
+    info "Direct package URL discovered."
 
-    rm -f "$temp_deb"
+    local package_file="/tmp/quikefix-wazuh-agent.deb"
 
-    if ! curl -fL "$package_url" \
-         -o "$temp_deb" >>"$LOG_FILE" 2>&1; then
+    rm -f "$package_file"
 
-        warn "PLAN C: Package download failed."
-        rm -f "$temp_deb"
+    if ! curl -fL "$package_url" -o "$package_file" \
+        >>"$LOG_FILE" 2>&1
+    then
+        warn "Direct package download failed."
         return 1
     fi
 
     if WAZUH_MANAGER="$WAZUH_MANAGER" \
        WAZUH_AGENT_NAME="$WAZUH_AGENT_NAME" \
-       apt-get install -y "$temp_deb" >>"$LOG_FILE" 2>&1; then
-
-        PLAN_USED="Plan C - Direct package"
-        rm -f "$temp_deb"
+       apt-get install -y "$package_file" >>"$LOG_FILE" 2>&1
+    then
+        INSTALL_METHOD="Plan C - Direct package"
+        pass "Wazuh agent installed using direct package."
+        rm -f "$package_file"
         return 0
     fi
 
-    rm -f "$temp_deb"
+    rm -f "$package_file"
 
     warn "PLAN C failed."
     return 1
 }
 
 # ============================================================
-# INSTALL / REPAIR
-# ============================================================
-
-if [ "$AGENT_ALREADY_INSTALLED" = "NO" ]; then
-
-    install_plan_a || install_plan_b || install_plan_c || {
-
-        fail "All installation plans failed."
-        fail "Review: $LOG_FILE"
-        exit 1
-
-    }
-
-else
-
-    PLAN_USED="Existing installation"
-
-fi
-
-# ============================================================
-# VERIFY INSTALLATION
+# INSTALL IF REQUIRED
 # ============================================================
 
 if ! dpkg-query -W -f='${Status}' wazuh-agent 2>/dev/null |
-     grep -q "install ok installed"; then
+    grep -q "install ok installed"
+then
 
-    fail "Wazuh package verification failed."
-    exit 1
-
+    if ! install_plan_a; then
+        if ! install_plan_b; then
+            if ! install_plan_c; then
+                fail "All Wazuh installation methods failed."
+                fail "Review $LOG_FILE"
+                exit 1
+            fi
+        fi
+    fi
 fi
 
-ok "Wazuh agent package verified."
+# ============================================================
+# VERIFY PACKAGE
+# ============================================================
+
+if ! dpkg-query -W -f='${Status}' wazuh-agent 2>/dev/null |
+    grep -q "install ok installed"
+then
+    fail "Wazuh package verification failed."
+    exit 1
+fi
+
+pass "Wazuh agent package verified."
 
 # ============================================================
 # VERIFY / REPAIR MANAGER CONFIGURATION
 # ============================================================
 
 if [ ! -f "$OSSEC_CONF" ]; then
-
-    fail "$OSSEC_CONF does not exist."
+    fail "Wazuh configuration file was not found: $OSSEC_CONF"
     exit 1
-
 fi
 
 info "Checking Wazuh manager configuration."
 
 CURRENT_MANAGER="$(
-    sed -n '/<server>/,/<\/server>/p' "$OSSEC_CONF" |
-    sed -n 's:.*<address>\(.*\)</address>.*:\1:p' |
-    head -n1
+    sed -n \
+        's:.*<address>[[:space:]]*\([^<]*\)[[:space:]]*</address>.*:\1:p' \
+        "$OSSEC_CONF" |
+    head -n1 |
+    xargs
 )"
 
 if [ "$CURRENT_MANAGER" != "$WAZUH_MANAGER" ]; then
 
-    warn "Current manager is: ${CURRENT_MANAGER:-not configured}"
+    warn "Current manager is: ${CURRENT_MANAGER:-Unknown}"
     info "Changing manager to $WAZUH_MANAGER"
+
+    BACKUP_FILE="$OSSEC_CONF.quikefix-backup-$(date '+%Y%m%d-%H%M%S')"
+
+    cp "$OSSEC_CONF" "$BACKUP_FILE" || {
+        fail "Unable to back up ossec.conf."
+        exit 1
+    }
 
     if grep -q '<address>.*</address>' "$OSSEC_CONF"; then
 
-        cp -a "$OSSEC_CONF" \
-            "${OSSEC_CONF}.quikefix-backup-$(date +%Y%m%d-%H%M%S)" \
-            2>>"$LOG_FILE" || true
-
         sed -i \
-        "0,/<address>.*<\/address>/s|<address>.*</address>|<address>$WAZUH_MANAGER</address>|" \
-        "$OSSEC_CONF"
+            "0,/<address>.*<\/address>/s|<address>.*</address>|<address>$WAZUH_MANAGER</address>|" \
+            "$OSSEC_CONF"
 
     else
 
-        fail "Unable to locate manager address in ossec.conf."
+        fail "Unable to locate manager <address> in ossec.conf."
         exit 1
 
     fi
-
 fi
 
-CONFIGURED_MANAGER="$(
-    sed -n '/<server>/,/<\/server>/p' "$OSSEC_CONF" |
-    sed -n 's:.*<address>\(.*\)</address>.*:\1:p' |
-    head -n1
+CURRENT_MANAGER="$(
+    sed -n \
+        's:.*<address>[[:space:]]*\([^<]*\)[[:space:]]*</address>.*:\1:p' \
+        "$OSSEC_CONF" |
+    head -n1 |
+    xargs
 )"
 
-if [ "$CONFIGURED_MANAGER" = "$WAZUH_MANAGER" ]; then
-    ok "Manager configuration verified."
-else
+if [ "$CURRENT_MANAGER" != "$WAZUH_MANAGER" ]; then
     fail "Manager configuration verification failed."
     exit 1
 fi
+
+pass "Manager configuration verified."
+
+# ============================================================
+# SECURE AGENT ENROLLMENT
+# ============================================================
+
+if [ ! -s "$CLIENT_KEYS" ]; then
+
+    info "No existing Wazuh enrollment key detected."
+    info "Starting password-protected enrollment."
+
+    if [ -z "${WAZUH_ENROLLMENT_PASSWORD:-}" ] ||
+       [ "$WAZUH_ENROLLMENT_PASSWORD" = "PUT-YOUR-PRIVATE-PASSWORD-HERE" ]
+    then
+        fail "Private Wazuh enrollment password has not been configured."
+        exit 1
+    fi
+
+    if [ ! -x /var/ossec/bin/agent-auth ]; then
+        fail "Wazuh agent-auth utility was not found."
+        exit 1
+    fi
+
+    #
+    # Do not log the command itself because it contains the password.
+    #
+    ENROLL_OUTPUT="$(
+        /var/ossec/bin/agent-auth \
+            -m "$WAZUH_MANAGER" \
+            -p 1515 \
+            -A "$WAZUH_AGENT_NAME" \
+            -P "$WAZUH_ENROLLMENT_PASSWORD" \
+            2>&1
+    )"
+
+    ENROLL_RC=$?
+
+    #
+    # Log sanitized enrollment output.
+    #
+    printf '%s\n' "$ENROLL_OUTPUT" |
+        sed 's/[Pp]assword[^ ]*/password/g' \
+        >>"$LOG_FILE" 2>/dev/null || true
+
+    unset ENROLL_OUTPUT
+
+    if [ "$ENROLL_RC" -ne 0 ]; then
+        fail "Secure Wazuh enrollment failed."
+        fail "Review $LOG_FILE"
+        exit 1
+    fi
+
+    if [ ! -s "$CLIENT_KEYS" ]; then
+        fail "Enrollment completed without creating a client key."
+        exit 1
+    fi
+
+    pass "Secure Wazuh enrollment completed."
+
+else
+
+    pass "Existing Wazuh enrollment key detected."
+
+fi
+
+# ============================================================
+# CAPTURE LOG POSITION BEFORE RESTART
+# ============================================================
+
+if [ -f "$OSSEC_LOG" ]; then
+    OSSEC_LOG_START_LINE="$(
+        wc -l <"$OSSEC_LOG" 2>/dev/null || echo 0
+    )"
+fi
+
+case "$OSSEC_LOG_START_LINE" in
+    ''|*[!0-9]*)
+        OSSEC_LOG_START_LINE=0
+        ;;
+esac
 
 # ============================================================
 # START AGENT
@@ -462,16 +567,9 @@ if ! systemctl restart wazuh-agent >>"$LOG_FILE" 2>&1; then
     sleep 3
 
     if ! systemctl restart wazuh-agent >>"$LOG_FILE" 2>&1; then
-
         fail "Wazuh agent service failed to start."
-
-        systemctl status wazuh-agent --no-pager -l |
-            tee -a "$LOG_FILE"
-
         exit 1
-
     fi
-
 fi
 
 # ============================================================
@@ -480,102 +578,120 @@ fi
 
 sleep 3
 
-SERVICE_STATE="$(systemctl is-active wazuh-agent 2>/dev/null || true)"
-
-if [ "$SERVICE_STATE" = "active" ]; then
-
-    ok "Wazuh agent service is ACTIVE."
-
+if systemctl is-active --quiet wazuh-agent; then
+    SERVICE_STATE="active"
+    pass "Wazuh agent service is ACTIVE."
 else
+    SERVICE_STATE="$(
+        systemctl is-active wazuh-agent 2>/dev/null || echo inactive
+    )"
 
-    fail "Wazuh agent service state: ${SERVICE_STATE:-unknown}"
-
-    systemctl status wazuh-agent --no-pager -l |
-        tee -a "$LOG_FILE"
-
+    fail "Wazuh agent service is not active."
     exit 1
-
 fi
 
 # ============================================================
 # CONNECTION VERIFICATION
 # ============================================================
 
-CONNECTED="NO"
-ELAPSED=0
-
 info "Waiting for Wazuh manager connection (up to ${CONNECTION_WAIT}s)..."
+
+ELAPSED=0
+CONNECTION_STATE="NO"
 
 while [ "$ELAPSED" -lt "$CONNECTION_WAIT" ]; do
 
-    # Check for a successful manager connection.
-    if grep -qiE \
-       'Connected to the server|Connected to server|Server responded|Agent is now online' \
-       "$OSSEC_LOG" 2>/dev/null; then
+    if [ -f "$OSSEC_LOG" ]; then
 
-        CONNECTED="YES"
-        ok "Agent successfully connected to Wazuh manager."
-        break
+        NEW_LOG="$(
+            tail -n "+$((OSSEC_LOG_START_LINE + 1))" \
+                "$OSSEC_LOG" 2>/dev/null || true
+        )"
 
+        if printf '%s\n' "$NEW_LOG" |
+            grep -qiE \
+            'Connected to the server|Connected to server|Server responded|Agent is now online'
+        then
+            CONNECTION_STATE="YES"
+            pass "Agent successfully connected to Wazuh manager."
+            break
+        fi
+
+        if printf '%s\n' "$NEW_LOG" |
+            grep -qiE \
+            'Invalid server address|Invalid password|Authentication error|Duplicate agent name|Unable to add agent'
+        then
+            warn "Wazuh reported an authentication/enrollment error."
+            break
+        fi
     fi
 
-    # Detect common hard failures while waiting.
-    if tail -n 100 "$OSSEC_LOG" 2>/dev/null |
-       grep -qiE \
-       'Invalid server address|Authentication error|Invalid password|Duplicate agent name'; then
+    #
+    # Secondary verification using an established TCP session.
+    #
+    if command -v ss >/dev/null 2>&1; then
 
-        warn "Wazuh reported a connection/enrollment error."
-        break
-
+        if ss -tn 2>/dev/null |
+            grep -E 'ESTAB' |
+            grep -qE "(${MANAGER_IP//./\\.}|$WAZUH_MANAGER):1514"
+        then
+            CONNECTION_STATE="YES"
+            pass "Established Wazuh TCP 1514 connection detected."
+            break
+        fi
     fi
 
     sleep "$CONNECTION_INTERVAL"
 
     ELAPSED=$((ELAPSED + CONNECTION_INTERVAL))
 
-    info "Waiting for manager connection... ${ELAPSED}/${CONNECTION_WAIT}s"
-
+    info "Waiting for manager connection... $ELAPSED/$CONNECTION_WAIT seconds"
 done
+
+unset NEW_LOG 2>/dev/null || true
 
 # ============================================================
 # FINAL SERVICE CHECK
 # ============================================================
 
-SERVICE_STATE="$(systemctl is-active wazuh-agent 2>/dev/null || true)"
+if systemctl is-active --quiet wazuh-agent; then
+    SERVICE_STATE="active"
+else
+    SERVICE_STATE="$(
+        systemctl is-active wazuh-agent 2>/dev/null || echo inactive
+    )"
+fi
 
 # ============================================================
-# SUMMARY
+# FINAL RESULT
 # ============================================================
 
-log ""
-log "============================================================"
-log " QUIKEFIX WAZUH INSTALLATION RESULT"
-log "============================================================"
-log "OS             : ${PRETTY_NAME:-$OS_ID}"
-log "Architecture   : $ARCH"
-log "Agent Name     : $WAZUH_AGENT_NAME"
-log "Manager        : $WAZUH_MANAGER"
-log "Manager IP     : ${MANAGER_IP:-Unknown}"
-log "Install Method : $PLAN_USED"
-log "Service        : ${SERVICE_STATE:-unknown}"
-log "Connection     : $CONNECTED"
-log "Log            : $LOG_FILE"
-log "============================================================"
+echo
+separator
+echo " QUIKEFIX WAZUH INSTALLATION RESULT"
+separator
+echo "OS             : $OS_NAME"
+echo "Architecture   : $ARCH"
+echo "Agent Name     : $WAZUH_AGENT_NAME"
+echo "Manager        : $WAZUH_MANAGER"
+echo "Manager IP     : $MANAGER_IP"
+echo "Install Method : $INSTALL_METHOD"
+echo "Service        : $SERVICE_STATE"
+echo "Connection     : $CONNECTION_STATE"
+echo "Log            : $LOG_FILE"
+separator
 
 if [ "$SERVICE_STATE" = "active" ] &&
-   [ "$CONNECTED" = "YES" ]; then
-
-    log "${green}RESULT: SUCCESS${reset}"
+   [ "$CONNECTION_STATE" = "YES" ]
+then
+    echo "RESULT: SUCCESS"
     exit 0
-
-else
-
-    fail "Wazuh installation did not pass final connection verification."
-    fail "Review:"
-    fail "  $LOG_FILE"
-    fail "  $OSSEC_LOG"
-    log "${red}RESULT: FAILED${reset}"
-
-    exit 1
-
 fi
+
+fail "Wazuh installation did not pass final connection verification."
+fail "Review:"
+fail "  $LOG_FILE"
+fail "  $OSSEC_LOG"
+
+echo "RESULT: FAILED"
+exit 1

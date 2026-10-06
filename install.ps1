@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 QuikeFix Wazuh Agent Universal Installer - Windows
-Repository: quikefix/quikefix-wazuh-agent-installer
+Secure Private Edition
 #>
 
 $ErrorActionPreference = "Stop"
@@ -29,99 +29,176 @@ $RegistrationServer = if ($env:WAZUH_REGISTRATION_SERVER) {
     $WazuhManager
 }
 
+# ============================================================
+# PRIVATE ENROLLMENT CONFIGURATION
+# ============================================================
+
+$WazuhEnrollmentPassword = if ($env:WAZUH_REGISTRATION_PASSWORD) {
+    $env:WAZUH_REGISTRATION_PASSWORD
+} else {
+    "FcD09z0XRQKt0ucDMRvMhdFuqyEuwXG75HDFD+nBqyc="
+}
+
+# ============================================================
+# INSTALLER SETTINGS
+# ============================================================
+
+$WazuhVersion = "4.14.8-1"
+$MsiUrl = "https://packages.wazuh.com/4.x/windows/wazuh-agent-$WazuhVersion.msi"
+$MsiFile = Join-Path $env:TEMP "quikefix-wazuh-agent.msi"
+
+$ServiceName = "WazuhSvc"
+
+$AgentDirectory64 = "${env:ProgramFiles(x86)}\ossec-agent"
+$AgentDirectory32 = "$env:ProgramFiles\ossec-agent"
+
 $ConnectionWait = 60
 $ConnectionInterval = 5
 
 $LogDirectory = Join-Path $env:ProgramData "QuikeFix\Wazuh"
 $LogFile = Join-Path $LogDirectory "install.log"
 
-$AgentDirectory64 = "${env:ProgramFiles(x86)}\ossec-agent"
-$AgentDirectory32 = "$env:ProgramFiles\ossec-agent"
-
-$ServiceName = "WazuhSvc"
-
-$MsiUrl = "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.8-1.msi"
-$MsiFile = Join-Path $env:TEMP "quikefix-wazuh-agent.msi"
-
 $InstallMethod = "None"
 $ConnectionState = "NO"
+$ServiceState = "unknown"
 $ManagerIP = "Unknown"
 
 # ============================================================
-# OUTPUT
+# SELF-ELEVATION
 # ============================================================
 
-New-Item -ItemType Directory -Path $LogDirectory -Force |
-    Out-Null
+$CurrentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 
-function Write-Log {
-    param(
-        [string]$Message,
-        [string]$Color = "White"
-    )
+$CurrentPrincipal = New-Object `
+    Security.Principal.WindowsPrincipal($CurrentIdentity)
 
-    Write-Host $Message -ForegroundColor $Color
+$IsAdministrator = $CurrentPrincipal.IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
 
-    $PlainMessage = $Message -replace '\x1b\[[0-9;]*m', ''
+if (-not $IsAdministrator) {
 
-    Add-Content -Path $LogFile -Value $PlainMessage
+    Write-Host ""
+    Write-Host "Administrator privileges are required."
+    Write-Host "Requesting Windows UAC elevation..."
+    Write-Host ""
+
+    if (-not $PSCommandPath) {
+        Write-Host "Unable to self-elevate because the script is not running from a file." `
+            -ForegroundColor Red
+        Write-Host "Run PowerShell as Administrator and execute the installer again."
+        exit 1
+    }
+
+    try {
+
+        $ElevatedArguments = @(
+            "-NoProfile"
+            "-ExecutionPolicy"
+            "Bypass"
+            "-File"
+            "`"$PSCommandPath`""
+        )
+
+        $Process = Start-Process `
+            -FilePath "powershell.exe" `
+            -ArgumentList $ElevatedArguments `
+            -Verb RunAs `
+            -Wait `
+            -PassThru
+
+        exit $Process.ExitCode
+
+    }
+    catch {
+
+        Write-Host "Administrator elevation was cancelled or failed." `
+            -ForegroundColor Red
+        exit 1
+
+    }
 }
 
-function Write-Pass {
-    param([string]$Message)
-    Write-Log "[PASS] $Message" "Green"
+# ============================================================
+# LOGGING
+# ============================================================
+
+New-Item `
+    -ItemType Directory `
+    -Path $LogDirectory `
+    -Force |
+    Out-Null
+
+function Write-QFLog {
+
+    param(
+        [string]$Level,
+        [string]$Message,
+        [ConsoleColor]$Color = [ConsoleColor]::White
+    )
+
+    $Line = "[$Level] $Message"
+
+    Write-Host $Line -ForegroundColor $Color
+
+    try {
+        Add-Content `
+            -Path $LogFile `
+            -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Line"
+    }
+    catch {
+        # Logging failure must not terminate installation.
+    }
 }
 
 function Write-InfoQF {
     param([string]$Message)
-    Write-Log "[INFO] $Message" "Cyan"
+    Write-QFLog "INFO" $Message Cyan
+}
+
+function Write-Pass {
+    param([string]$Message)
+    Write-QFLog "PASS" $Message Green
 }
 
 function Write-WarnQF {
     param([string]$Message)
-    Write-Log "[WARN] $Message" "Yellow"
+    Write-QFLog "WARN" $Message Yellow
 }
 
 function Write-Fail {
     param([string]$Message)
-    Write-Log "[FAIL] $Message" "Red"
+    Write-QFLog "FAIL" $Message Red
 }
 
 # ============================================================
 # HEADER
 # ============================================================
 
-Write-Log ""
-Write-Log "============================================================"
-Write-Log " QUIKEFIX WAZUH AGENT INSTALLER - WINDOWS"
-Write-Log "============================================================"
-Write-Log "Started      : $(Get-Date)"
-Write-Log "Computer     : $env:COMPUTERNAME"
-Write-Log "Agent Name   : $WazuhAgentName"
-Write-Log "Manager      : $WazuhManager"
-Write-Log "============================================================"
-
-# ============================================================
-# ADMINISTRATOR CHECK
-# ============================================================
-
-$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-
-$Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
-
-$IsAdmin = $Principal.IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator
-)
-
-if (-not $IsAdmin) {
-
-    Write-Fail "Administrator privileges are required."
-    Write-Fail "Open PowerShell as Administrator and run again."
-
-    exit 1
-}
+Write-Host ""
+Write-Host "============================================================"
+Write-Host " QUIKEFIX WAZUH AGENT INSTALLER - WINDOWS"
+Write-Host "============================================================"
+Write-Host "Started      : $(Get-Date)"
+Write-Host "Computer     : $env:COMPUTERNAME"
+Write-Host "Agent Name   : $WazuhAgentName"
+Write-Host "Manager      : $WazuhManager"
+Write-Host "============================================================"
 
 Write-Pass "Administrator privileges confirmed."
+
+# ============================================================
+# PASSWORD CHECK
+# ============================================================
+
+if (
+    [string]::IsNullOrWhiteSpace($WazuhEnrollmentPassword) -or
+    $WazuhEnrollmentPassword -eq "PUT-YOUR-PRIVATE-PASSWORD-HERE"
+) {
+
+    Write-Fail "Private Wazuh enrollment password has not been configured."
+    exit 1
+}
 
 # ============================================================
 # OPERATING SYSTEM
@@ -158,24 +235,31 @@ try {
 
 }
 catch {
-    # Continue. Modern PowerShell normally negotiates TLS correctly.
 }
 
 # ============================================================
-# DNS TEST
+# DNS
 # ============================================================
 
 Write-InfoQF "Testing manager DNS..."
 
 try {
 
-    $Resolved = Resolve-DnsName `
-        -Name $WazuhManager `
-        -Type A `
-        -ErrorAction Stop |
-        Select-Object -First 1
+    $ResolvedAddresses = @(
+        Resolve-DnsName `
+            -Name $WazuhManager `
+            -Type A `
+            -ErrorAction Stop |
+        Where-Object {
+            $_.IPAddress
+        }
+    )
 
-    $ManagerIP = $Resolved.IPAddress
+    if ($ResolvedAddresses.Count -eq 0) {
+        throw "No IPv4 address returned."
+    }
+
+    $ManagerIP = $ResolvedAddresses[0].IPAddress
 
     Write-Pass "$WazuhManager resolves to $ManagerIP"
 
@@ -187,7 +271,7 @@ catch {
 }
 
 # ============================================================
-# TCP PORT TEST
+# TCP TEST
 # ============================================================
 
 function Test-QFTcpPort {
@@ -202,14 +286,14 @@ function Test-QFTcpPort {
 
     try {
 
-        $Async = $Client.BeginConnect(
+        $AsyncResult = $Client.BeginConnect(
             $ComputerName,
             $Port,
             $null,
             $null
         )
 
-        $Connected = $Async.AsyncWaitHandle.WaitOne(
+        $Connected = $AsyncResult.AsyncWaitHandle.WaitOne(
             $TimeoutMilliseconds,
             $false
         )
@@ -218,68 +302,72 @@ function Test-QFTcpPort {
             return $false
         }
 
-        $Client.EndConnect($Async)
+        $Client.EndConnect($AsyncResult)
 
         return $true
 
     }
     catch {
-
         return $false
-
     }
     finally {
-
         $Client.Close()
-
     }
 }
 
-$Port1514 = Test-QFTcpPort `
-    -ComputerName $WazuhManager `
-    -Port 1514
+if (
+    Test-QFTcpPort `
+        -ComputerName $WazuhManager `
+        -Port 1514
+) {
 
-if ($Port1514) {
     Write-Pass "TCP 1514 reachable."
+
 }
 else {
+
     Write-Fail "TCP 1514 is unreachable."
     Write-Fail "Agent communication cannot continue."
     exit 1
 }
 
-$Port1515 = Test-QFTcpPort `
+$Port1515Reachable = Test-QFTcpPort `
     -ComputerName $RegistrationServer `
     -Port 1515
 
-if ($Port1515) {
+if ($Port1515Reachable) {
+
     Write-Pass "TCP 1515 reachable."
+
 }
 else {
+
     Write-WarnQF "TCP 1515 enrollment port is unreachable."
-    Write-WarnQF "An already-enrolled agent may still connect."
+
 }
 
 # ============================================================
-# FIND EXISTING INSTALLATION
+# FIND WAZUH INSTALLATION
 # ============================================================
+
+function Get-QFAgentDirectory {
+
+    if (Test-Path $AgentDirectory64) {
+        return $AgentDirectory64
+    }
+
+    if (Test-Path $AgentDirectory32) {
+        return $AgentDirectory32
+    }
+
+    return $null
+}
 
 $ExistingService = Get-Service `
     -Name $ServiceName `
     -ErrorAction SilentlyContinue
 
-$AgentDirectory = $null
-
-if (Test-Path $AgentDirectory64) {
-
-    $AgentDirectory = $AgentDirectory64
-
-}
-elseif (Test-Path $AgentDirectory32) {
-
-    $AgentDirectory = $AgentDirectory32
-
-}
+$AgentDirectory = Get-QFAgentDirectory
 
 if ($ExistingService) {
 
@@ -294,18 +382,49 @@ else {
 }
 
 # ============================================================
-# DOWNLOAD WAZUH MSI
+# DETERMINE WHETHER EXISTING AGENT IS ENROLLED
 # ============================================================
 
-function Download-WazuhInstaller {
+$ExistingEnrollment = $false
+
+if ($AgentDirectory) {
+
+    $ExistingClientKeys = Join-Path $AgentDirectory "client.keys"
+
+    if (
+        (Test-Path $ExistingClientKeys) -and
+        ((Get-Item $ExistingClientKeys).Length -gt 0)
+    ) {
+
+        $ExistingEnrollment = $true
+        Write-Pass "Existing Wazuh enrollment key detected."
+
+    }
+}
+
+if (
+    -not $ExistingEnrollment -and
+    -not $Port1515Reachable
+) {
+
+    Write-Fail "This machine is not enrolled and TCP 1515 is required."
+    exit 1
+}
+
+# ============================================================
+# DOWNLOAD MSI
+# ============================================================
+
+function Get-QFWazuhInstaller {
 
     Write-InfoQF "Downloading official Wazuh Windows agent..."
 
     try {
 
-        if (Test-Path $MsiFile) {
-            Remove-Item $MsiFile -Force
-        }
+        Remove-Item `
+            -Path $MsiFile `
+            -Force `
+            -ErrorAction SilentlyContinue
 
         Invoke-WebRequest `
             -Uri $MsiUrl `
@@ -314,13 +433,13 @@ function Download-WazuhInstaller {
             -ErrorAction Stop
 
         if (-not (Test-Path $MsiFile)) {
-            throw "Installer file was not created."
+            throw "Installer was not downloaded."
         }
 
         $Size = (Get-Item $MsiFile).Length
 
         if ($Size -lt 1MB) {
-            throw "Downloaded installer is unexpectedly small."
+            throw "Downloaded MSI is unexpectedly small."
         }
 
         Write-Pass "Wazuh MSI downloaded."
@@ -340,7 +459,7 @@ function Download-WazuhInstaller {
 # VERIFY MSI SIGNATURE
 # ============================================================
 
-function Test-WazuhInstallerSignature {
+function Test-QFWazuhSignature {
 
     if (-not (Test-Path $MsiFile)) {
         return $false
@@ -371,24 +490,30 @@ function Test-WazuhInstallerSignature {
 }
 
 # ============================================================
-# INSTALL PLAN A
+# MSI INSTALL
 # ============================================================
 
-function Install-WazuhPlanA {
+function Install-QFWazuhMSI {
 
-    Write-InfoQF "PLAN A: Installing official Wazuh MSI."
+    param(
+        [string]$MethodName
+    )
 
-    if (-not (Download-WazuhInstaller)) {
+    if (-not (Test-Path $MsiFile)) {
+
+        if (-not (Get-QFWazuhInstaller)) {
+            return $false
+        }
+    }
+
+    if (-not (Test-QFWazuhSignature)) {
         return $false
     }
 
-    if (-not (Test-WazuhInstallerSignature)) {
-
-        Write-Fail "Official MSI signature verification failed."
-        return $false
-
-    }
-
+    #
+    # Password is supplied directly to msiexec and is never
+    # written to the QuikeFix installation log.
+    #
     $Arguments = @(
         "/i"
         "`"$MsiFile`""
@@ -397,16 +522,8 @@ function Install-WazuhPlanA {
         "WAZUH_MANAGER=`"$WazuhManager`""
         "WAZUH_REGISTRATION_SERVER=`"$RegistrationServer`""
         "WAZUH_AGENT_NAME=`"$WazuhAgentName`""
+        "WAZUH_REGISTRATION_PASSWORD=`"$WazuhEnrollmentPassword`""
     )
-
-    if ($env:WAZUH_REGISTRATION_PASSWORD) {
-
-        $Arguments +=
-            "WAZUH_REGISTRATION_PASSWORD=`"$($env:WAZUH_REGISTRATION_PASSWORD)`""
-
-        Write-InfoQF "Enrollment password supplied through environment."
-
-    }
 
     try {
 
@@ -418,113 +535,50 @@ function Install-WazuhPlanA {
 
         if ($Process.ExitCode -in @(0, 3010)) {
 
-            $script:InstallMethod = "Plan A - Official MSI"
+            $script:InstallMethod = $MethodName
 
             Write-Pass "Wazuh MSI installation completed."
 
             return $true
-
         }
 
-        Write-WarnQF "PLAN A returned MSI exit code $($Process.ExitCode)"
+        Write-WarnQF "MSI returned exit code $($Process.ExitCode)"
 
         return $false
 
     }
     catch {
 
-        Write-WarnQF "PLAN A failed: $($_.Exception.Message)"
-
+        Write-WarnQF "MSI installation failed: $($_.Exception.Message)"
         return $false
 
     }
 }
 
 # ============================================================
-# INSTALL PLAN B
-# RETRY MSI
-# ============================================================
-
-function Install-WazuhPlanB {
-
-    Write-InfoQF "PLAN B: Retrying Wazuh MSI installation."
-
-    Start-Sleep -Seconds 3
-
-    if (-not (Test-Path $MsiFile)) {
-
-        if (-not (Download-WazuhInstaller)) {
-            return $false
-        }
-
-    }
-
-    if (-not (Test-WazuhInstallerSignature)) {
-        return $false
-    }
-
-    $Arguments = @(
-        "/i"
-        "`"$MsiFile`""
-        "/qn"
-        "/norestart"
-        "WAZUH_MANAGER=`"$WazuhManager`""
-        "WAZUH_REGISTRATION_SERVER=`"$RegistrationServer`""
-        "WAZUH_AGENT_NAME=`"$WazuhAgentName`""
-    )
-
-    if ($env:WAZUH_REGISTRATION_PASSWORD) {
-
-        $Arguments +=
-            "WAZUH_REGISTRATION_PASSWORD=`"$($env:WAZUH_REGISTRATION_PASSWORD)`""
-
-    }
-
-    try {
-
-        $Process = Start-Process `
-            -FilePath "msiexec.exe" `
-            -ArgumentList $Arguments `
-            -Wait `
-            -PassThru
-
-        if ($Process.ExitCode -in @(0, 3010)) {
-
-            $script:InstallMethod =
-                "Plan B - MSI retry"
-
-            Write-Pass "Wazuh MSI retry completed."
-
-            return $true
-
-        }
-
-        Write-WarnQF "PLAN B returned MSI exit code $($Process.ExitCode)"
-
-        return $false
-
-    }
-    catch {
-
-        Write-WarnQF "PLAN B failed: $($_.Exception.Message)"
-
-        return $false
-
-    }
-}
-
-# ============================================================
-# INSTALL IF NEEDED
+# FRESH INSTALLATION
 # ============================================================
 
 if (-not $ExistingService) {
 
-    $Installed = Install-WazuhPlanA
+    Write-InfoQF "PLAN A: Installing official Wazuh MSI."
+
+    $Installed = Install-QFWazuhMSI `
+        -MethodName "Plan A - Official MSI"
 
     if (-not $Installed) {
 
-        $Installed = Install-WazuhPlanB
+        Write-InfoQF "PLAN B: Retrying Wazuh MSI installation."
 
+        Start-Sleep -Seconds 3
+
+        Remove-Item `
+            -Path $MsiFile `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+        $Installed = Install-QFWazuhMSI `
+            -MethodName "Plan B - MSI retry"
     }
 
     if (-not $Installed) {
@@ -533,18 +587,11 @@ if (-not $ExistingService) {
         Write-Fail "Review $LogFile"
 
         exit 1
-
     }
-
-}
-else {
-
-    $InstallMethod = "Existing installation"
-
 }
 
 # ============================================================
-# REFRESH INSTALLATION INFORMATION
+# VERIFY INSTALLATION
 # ============================================================
 
 Start-Sleep -Seconds 2
@@ -557,33 +604,24 @@ if (-not $ExistingService) {
 
     Write-Fail "WazuhSvc was not found after installation."
     exit 1
-
 }
 
-if (Test-Path $AgentDirectory64) {
+$AgentDirectory = Get-QFAgentDirectory
 
-    $AgentDirectory = $AgentDirectory64
-
-}
-elseif (Test-Path $AgentDirectory32) {
-
-    $AgentDirectory = $AgentDirectory32
-
-}
-else {
+if (-not $AgentDirectory) {
 
     Write-Fail "Wazuh installation directory was not found."
     exit 1
-
 }
 
 Write-Pass "Wazuh agent installation verified."
 
 $OssecConf = Join-Path $AgentDirectory "ossec.conf"
 $OssecLog = Join-Path $AgentDirectory "ossec.log"
+$ClientKeys = Join-Path $AgentDirectory "client.keys"
 
 # ============================================================
-# VERIFY / REPAIR MANAGER CONFIGURATION
+# VERIFY / REPAIR MANAGER
 # ============================================================
 
 if (-not (Test-Path $OssecConf)) {
@@ -592,7 +630,6 @@ if (-not (Test-Path $OssecConf)) {
     Write-Fail $OssecConf
 
     exit 1
-
 }
 
 Write-InfoQF "Checking Wazuh manager configuration."
@@ -609,9 +646,7 @@ try {
     ) | Select-Object -First 1
 
     if (-not $ServerNode) {
-
         throw "No client/server configuration found."
-
     }
 
     $CurrentManager = [string]$ServerNode.address
@@ -633,7 +668,6 @@ try {
         $ServerNode.address = $WazuhManager
 
         $ConfigXML.Save($OssecConf)
-
     }
 
 }
@@ -643,7 +677,6 @@ catch {
     Write-Fail $_.Exception.Message
 
     exit 1
-
 }
 
 try {
@@ -657,9 +690,7 @@ try {
     )
 
     if ($ConfiguredManager -ne $WazuhManager) {
-
         throw "Configured manager is $ConfiguredManager"
-
     }
 
     Write-Pass "Manager configuration verified."
@@ -669,11 +700,46 @@ catch {
 
     Write-Fail "Manager configuration verification failed."
     exit 1
-
 }
 
 # ============================================================
-# START / RESTART AGENT
+# VERIFY SECURE ENROLLMENT
+# ============================================================
+
+if (
+    (Test-Path $ClientKeys) -and
+    ((Get-Item $ClientKeys).Length -gt 0)
+) {
+
+    Write-Pass "Wazuh enrollment key verified."
+
+}
+else {
+
+    Write-Fail "No Wazuh enrollment key was created."
+    Write-Fail "Secure enrollment did not complete."
+
+    exit 1
+}
+
+# ============================================================
+# RECORD CURRENT LOG POSITION
+# ============================================================
+
+$OssecLogStartLength = 0
+
+if (Test-Path $OssecLog) {
+
+    try {
+        $OssecLogStartLength = (Get-Item $OssecLog).Length
+    }
+    catch {
+        $OssecLogStartLength = 0
+    }
+}
+
+# ============================================================
+# START / RESTART SERVICE
 # ============================================================
 
 Write-InfoQF "Starting Wazuh agent."
@@ -691,13 +757,15 @@ try {
 
         Restart-Service `
             -Name $ServiceName `
-            -Force
+            -Force `
+            -ErrorAction Stop
 
     }
     else {
 
         Start-Service `
-            -Name $ServiceName
+            -Name $ServiceName `
+            -ErrorAction Stop
 
     }
 
@@ -721,13 +789,11 @@ catch {
         Write-Fail $_.Exception.Message
 
         exit 1
-
     }
-
 }
 
 # ============================================================
-# SERVICE VERIFICATION
+# SERVICE CHECK
 # ============================================================
 
 Start-Sleep -Seconds 3
@@ -742,7 +808,6 @@ if (
 ) {
 
     $ServiceState = "running"
-
     Write-Pass "Wazuh agent service is RUNNING."
 
 }
@@ -755,9 +820,59 @@ else {
     }
 
     Write-Fail "Wazuh agent service state: $ServiceState"
-
     exit 1
+}
 
+# ============================================================
+# FRESH LOG READER
+# ============================================================
+
+function Get-QFNewWazuhLog {
+
+    if (-not (Test-Path $OssecLog)) {
+        return ""
+    }
+
+    try {
+
+        $CurrentLength = (Get-Item $OssecLog).Length
+
+        if ($CurrentLength -lt $OssecLogStartLength) {
+            $script:OssecLogStartLength = 0
+        }
+
+        $Stream = New-Object System.IO.FileStream(
+            $OssecLog,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite
+        )
+
+        try {
+
+            [void]$Stream.Seek(
+                $script:OssecLogStartLength,
+                [System.IO.SeekOrigin]::Begin
+            )
+
+            $Reader = New-Object System.IO.StreamReader($Stream)
+
+            try {
+                return $Reader.ReadToEnd()
+            }
+            finally {
+                $Reader.Dispose()
+            }
+
+        }
+        finally {
+            $Stream.Dispose()
+        }
+
+    }
+    catch {
+        return ""
+    }
 }
 
 # ============================================================
@@ -772,72 +887,64 @@ Write-InfoQF `
 
 while ($Elapsed -lt $ConnectionWait) {
 
-    # Primary verification:
-    # actual established TCP session to manager port 1514.
+    #
+    # Primary check: new Wazuh log data generated after this restart.
+    #
+    $NewWazuhLog = Get-QFNewWazuhLog
+
+    if (
+        $NewWazuhLog -match
+        "Connected to the server|Connected to server|Server responded|Agent is now online"
+    ) {
+
+        $ConnectionState = "YES"
+
+        Write-Pass "Agent successfully connected to Wazuh manager."
+
+        break
+    }
+
+    if (
+        $NewWazuhLog -match
+        "Invalid server address|Invalid password|Authentication error|Duplicate agent name|Unable to add agent"
+    ) {
+
+        Write-WarnQF `
+            "Wazuh reported an authentication or enrollment error."
+
+        break
+    }
+
+    #
+    # Secondary check: established TCP 1514 session.
+    #
     try {
 
-        $Established = Get-NetTCPConnection `
-            -RemotePort 1514 `
-            -State Established `
-            -ErrorAction SilentlyContinue
+        $EstablishedConnections = @(
+            Get-NetTCPConnection `
+                -RemotePort 1514 `
+                -State Established `
+                -ErrorAction SilentlyContinue
+        )
 
-        if ($Established) {
+        $MatchingConnection = $EstablishedConnections |
+            Where-Object {
+                $_.RemoteAddress -eq $ManagerIP
+            } |
+            Select-Object -First 1
+
+        if ($MatchingConnection) {
 
             $ConnectionState = "YES"
 
             Write-Pass `
-                "Agent has an established TCP connection to port 1514."
+                "Agent has an established TCP connection to Wazuh manager."
 
             break
-
         }
 
     }
     catch {
-        # Fall back to Wazuh log verification below.
-    }
-
-    # Secondary verification through the Wazuh agent log.
-    if (Test-Path $OssecLog) {
-
-        try {
-
-            $RecentLog = Get-Content `
-                -Path $OssecLog `
-                -Tail 150 `
-                -ErrorAction SilentlyContinue
-
-            if (
-                $RecentLog -match
-                "Connected to the server|Connected to server|Server responded|Agent is now online"
-            ) {
-
-                $ConnectionState = "YES"
-
-                Write-Pass `
-                    "Agent successfully connected to Wazuh manager."
-
-                break
-
-            }
-
-            if (
-                $RecentLog -match
-                "Invalid server address|Authentication error|Invalid password|Duplicate agent name"
-            ) {
-
-                Write-WarnQF `
-                    "Wazuh reported an enrollment or authentication error."
-
-                break
-
-            }
-
-        }
-        catch {
-            # Continue waiting.
-        }
-
     }
 
     Start-Sleep -Seconds $ConnectionInterval
@@ -846,7 +953,6 @@ while ($Elapsed -lt $ConnectionWait) {
 
     Write-InfoQF `
         "Waiting for manager connection... $Elapsed/$ConnectionWait seconds"
-
 }
 
 # ============================================================
@@ -861,9 +967,12 @@ if (
     $Service -and
     $Service.Status -eq "Running"
 ) {
+
     $ServiceState = "running"
+
 }
 else {
+
     $ServiceState = if ($Service) {
         $Service.Status.ToString()
     } else {
@@ -875,54 +984,47 @@ else {
 # CLEANUP
 # ============================================================
 
-if (Test-Path $MsiFile) {
-
-    Remove-Item `
-        -Path $MsiFile `
-        -Force `
-        -ErrorAction SilentlyContinue
-
-}
+Remove-Item `
+    -Path $MsiFile `
+    -Force `
+    -ErrorAction SilentlyContinue
 
 # ============================================================
 # SUMMARY
 # ============================================================
 
-Write-Log ""
-Write-Log "============================================================"
-Write-Log " QUIKEFIX WAZUH INSTALLATION RESULT"
-Write-Log "============================================================"
-Write-Log "OS             : $OSName"
-Write-Log "Architecture   : $OSArchitecture"
-Write-Log "Agent Name     : $WazuhAgentName"
-Write-Log "Manager        : $WazuhManager"
-Write-Log "Manager IP     : $ManagerIP"
-Write-Log "Install Method : $InstallMethod"
-Write-Log "Service        : $ServiceState"
-Write-Log "Connection     : $ConnectionState"
-Write-Log "Log            : $LogFile"
-Write-Log "============================================================"
+Write-Host ""
+Write-Host "============================================================"
+Write-Host " QUIKEFIX WAZUH INSTALLATION RESULT"
+Write-Host "============================================================"
+Write-Host "OS             : $OSName"
+Write-Host "Architecture   : $OSArchitecture"
+Write-Host "Agent Name     : $WazuhAgentName"
+Write-Host "Manager        : $WazuhManager"
+Write-Host "Manager IP     : $ManagerIP"
+Write-Host "Install Method : $InstallMethod"
+Write-Host "Service        : $ServiceState"
+Write-Host "Connection     : $ConnectionState"
+Write-Host "Log            : $LogFile"
+Write-Host "============================================================"
 
 if (
     $ServiceState -eq "running" -and
     $ConnectionState -eq "YES"
 ) {
 
-    Write-Log "RESULT: SUCCESS" "Green"
+    Write-Host "RESULT: SUCCESS" -ForegroundColor Green
     exit 0
 
 }
-else {
 
-    Write-Fail `
-        "Wazuh installation did not pass final connection verification."
+Write-Fail `
+    "Wazuh installation did not pass final connection verification."
 
-    Write-Fail "Review:"
-    Write-Fail "  $LogFile"
-    Write-Fail "  $OssecLog"
+Write-Fail "Review:"
+Write-Fail "  $LogFile"
+Write-Fail "  $OssecLog"
 
-    Write-Log "RESULT: FAILED" "Red"
+Write-Host "RESULT: FAILED" -ForegroundColor Red
 
-    exit 1
-
-}
+exit 1

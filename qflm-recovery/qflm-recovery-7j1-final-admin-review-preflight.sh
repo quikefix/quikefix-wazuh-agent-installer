@@ -195,7 +195,12 @@ echo "=== 9. SOURCE / BUILD REVIEW ==="
 dotnet build "$ROOT/QuikeFix.LicenseManager.slnx" -c Release || die "release build failed"
 
 cd "$GUI" || die "GUI source missing"
-npm run build || die "GUI build failed"
+docker run --rm \
+  -v "$GUI:/src" \
+  -w /src \
+  node:24-bookworm-slim \
+  sh -lc 'npm install --no-audit --no-fund >/dev/null && npm run build' \
+  || die "GUI build failed"
 
 echo "source_builds=PASS"
 

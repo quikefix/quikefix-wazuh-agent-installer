@@ -72,15 +72,12 @@ PROD_API_IMAGE=$(docker inspect "$PROD_API" --format='{{.Config.Image}}') || die
 PROD_API_RUNNING=$(docker inspect "$PROD_API" --format='{{.State.Running}}')
 PREVIEW_API_IMAGE=$(docker inspect "$PREVIEW_API" --format='{{.Config.Image}}' 2>/dev/null || echo missing)
 PREVIEW_GUI_IMAGE=$(docker inspect "$PREVIEW_GUI" --format='{{.Config.Image}}' 2>/dev/null || echo missing)
-PROD_GUI_IMAGE=$(docker inspect "$PROD_GUI_ISOLATED" --format='{{.Config.Image}}' 2>/dev/null || echo missing)
-PROD_GUI_RUNNING=$(docker inspect "$PROD_GUI_ISOLATED" --format='{{.State.Running}}' 2>/dev/null || echo missing)
+docker image inspect "$EXPECTED_PROD_GUI_IMAGE" >/dev/null 2>&1 || die "validated production GUI candidate image missing"
 
 [ "$PROD_API_IMAGE" = "$EXPECTED_PROD_API_IMAGE" ] || die "unexpected production API image"
 [ "$PROD_API_RUNNING" = true ] || die "production API not running"
 [ "$PREVIEW_API_IMAGE" = "$EXPECTED_PREVIEW_API_IMAGE" ] || die "unexpected preview API image"
 [ "$PREVIEW_GUI_IMAGE" = "$EXPECTED_PREVIEW_GUI_IMAGE" ] || die "unexpected preview GUI image"
-[ "$PROD_GUI_IMAGE" = "$EXPECTED_PROD_GUI_IMAGE" ] || die "unexpected isolated production GUI image"
-[ "$PROD_GUI_RUNNING" = true ] || die "isolated production GUI not running"
 
 MIG=$(docker exec "$PG" psql -U qflm -d "$PROD_DB" -tAc 'SELECT count(*) FROM "__EFMigrationsHistory";' | xargs)
 USERS=$(docker exec "$PG" psql -U qflm -d "$PROD_DB" -tAc 'SELECT count(*) FROM auth_users;' | xargs)
@@ -269,7 +266,7 @@ echo "CLOUDFLARE ORIGIN:                  http://$HOST_IP:$PREVIEW_PORT"
 echo "PRODUCTION API:                     HEALTHY / UNCHANGED"
 echo "PRODUCTION DATABASE:                UNCHANGED"
 echo "PREVIEW GUI ROLLBACK:               $ROLLBACK_GUI"
-echo "ISOLATED VALIDATION GUI:            $PROD_GUI_ISOLATED"
+echo "VALIDATED GUI CANDIDATE IMAGE:      $EXPECTED_PROD_GUI_IMAGE"
 echo "REPORT:                             $REPORT"
 echo "NEXT: RECOVERY 7L4 - PRODUCTION GUI FINAL FREEZE"
 echo "======================================================"

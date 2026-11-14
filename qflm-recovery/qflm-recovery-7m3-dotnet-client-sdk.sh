@@ -64,6 +64,7 @@ cat > "$SDK/QFLM.ClientSdk.csproj" <<'EOF'
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <PackageId>QuikeFix.QFLM.ClientSdk</PackageId>
     <Version>0.1.0</Version>

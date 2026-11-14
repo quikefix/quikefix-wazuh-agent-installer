@@ -205,6 +205,7 @@ USER root
 COPY nginx-recovery7j3.conf /etc/nginx/nginx-qflm.conf
 RUN chmod 444 /etc/nginx/nginx-qflm.conf
 USER nginx
+ENTRYPOINT ["nginx","-c","/etc/nginx/nginx-qflm.conf","-g","daemon off;"]
 DOCKER
 
 docker build \

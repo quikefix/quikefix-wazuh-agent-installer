@@ -399,6 +399,7 @@ cat > "$TESTS/QflmClientTests.cs" <<'EOF'
 using System.Net;
 using System.Text;
 using QFLM.ClientSdk;
+using Xunit;
 
 namespace QFLM.ClientSdk.Tests;
 

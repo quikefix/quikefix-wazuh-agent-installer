@@ -71,7 +71,7 @@ echo "=== 2. SDK SOURCE / TEST BASELINE ==="
 [ -f "$TESTS/QFLM.ClientSdk.Tests.csproj" ] || die "SDK tests project missing"
 
 dotnet build "$SDK/QFLM.ClientSdk.csproj" -c Release || die "SDK build failed"
-dotnet test "$TESTS/QFLM.ClientSdk.Tests.csproj" -c Release || die "SDK tests failed"
+DOTNET_ROLL_FORWARD=Major dotnet test "$TESTS/QFLM.ClientSdk.Tests.csproj" -c Release || die "SDK tests failed"
 
 echo "sdk_source_tests=PASS"
 
@@ -219,7 +219,7 @@ echo "=== 5. LIVE PUBLIC SDK COMPATIBILITY TEST ==="
 cd "$LIVE_TEST" || die "live harness directory missing"
 dotnet restore --configfile "$LIVE_TEST/NuGet.Config" || die "live harness restore failed"
 
-QFLM_BASE_URL="$PUBLIC_URL/" dotnet run -c Release --no-restore || die "live SDK compatibility failed"
+DOTNET_ROLL_FORWARD=Major QFLM_BASE_URL="$PUBLIC_URL/" dotnet run -c Release --no-restore || die "live SDK compatibility failed"
 
 echo "live_public_sdk_compatibility=PASS"
 

@@ -64,7 +64,7 @@ echo "=== 2. PRE-CHANGE DATABASE BACKUP ==="
 PRE="$OUT/qflm-pre-7n3.dump"
 docker exec "$PG" pg_dump -U qflm -Fc -d qflm > "$PRE" || die "pre-change database backup failed"
 [ -s "$PRE" ] || die "pre-change database backup empty"
-pg_restore -l "$PRE" >/dev/null || die "pre-change database backup validation failed"
+cat "$PRE" | docker exec -i "$PG" pg_restore -l >/dev/null || die "pre-change database backup validation failed"
 PRE_SHA=$(sha256sum "$PRE" | awk '{print $1}')
 
 echo "prechange_backup=$PRE"
@@ -115,7 +115,7 @@ docker inspect "$PG" >/dev/null 2>&1 || { echo "ERROR postgres container missing
 docker exec "$PG" pg_dump -U qflm -Fc -d "$DB" > "$TMP" || { echo "ERROR pg_dump failed"; exit 1; }
 [ -s "$TMP" ] || { echo "ERROR backup empty"; exit 1; }
 
-pg_restore -l "$TMP" >/dev/null || { echo "ERROR pg_restore validation failed"; exit 1; }
+cat "$TMP" | docker exec -i "$PG" pg_restore -l >/dev/null || { echo "ERROR pg_restore validation failed"; exit 1; }
 
 mv "$TMP" "$FINAL"
 sha256sum "$FINAL" > "$HASH"
@@ -133,7 +133,7 @@ chmod 700 "$OPS_BACKUP/qflm-daily-backup.sh"
 
 LATEST_BACKUP=$(find "$DAILY" -maxdepth 1 -type f -name 'qflm-*.dump' -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
 [ -n "$LATEST_BACKUP" ] || die "daily backup not created"
-pg_restore -l "$LATEST_BACKUP" >/dev/null || die "daily backup validation failed"
+cat "$LATEST_BACKUP" | docker exec -i "$PG" pg_restore -l >/dev/null || die "daily backup validation failed"
 
 echo "backup_script=PASS"
 

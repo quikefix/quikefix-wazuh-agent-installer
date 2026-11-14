@@ -30,12 +30,14 @@ BACKUP="/opt/qflm/backups/recovery7l2-production-gui-isolated-$STAMP"
 REPORT="$BACKUP/recovery7l2-production-gui-isolated-report.txt"
 NGINX_CONF="$BACKUP/nginx-recovery7l2.conf"
 DOCKERFILE="$BACKUP/Dockerfile.recovery7l2"
+BUILD_NGINX_CONF="$ROOT/nginx-recovery7l2.conf"
 
 KEEP_ISOLATED=0
 
 die(){ printf 'STOP: %s\n' "$*" >&2; exit 1; }
 
 cleanup(){
+    rm -f "$BUILD_NGINX_CONF" >/dev/null 2>&1 || true
     if [ "$KEEP_ISOLATED" != 1 ]; then
         docker rm -f "$PROD_GUI" >/dev/null 2>&1 || true
     fi
@@ -147,6 +149,9 @@ http {
 }
 NGINX
 
+cp "$NGINX_CONF" "$BUILD_NGINX_CONF" || die "failed to stage nginx config into build context"
+chmod 600 "$BUILD_NGINX_CONF"
+
 cat > "$DOCKERFILE" <<'DOCKER'
 FROM node:24-bookworm-slim AS build
 WORKDIR /src
@@ -169,6 +174,7 @@ DOCKER
 
 cd "$ROOT" || die "project root missing"
 docker build -f "$DOCKERFILE" -t "$PROD_GUI_IMAGE" "$ROOT" || die "production GUI candidate build failed"
+rm -f "$BUILD_NGINX_CONF"
 
 echo "production_gui_candidate_build=PASS"
 

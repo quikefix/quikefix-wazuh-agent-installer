@@ -28,6 +28,9 @@ EXPECTED_PREVIEW_GUI_IMAGE="qflm-admin-web:recovery7j3-preview"
 ADMIN_USER_FILE="/opt/qflm/secrets/auth/platform-admin-username"
 ADMIN_PASS_FILE="/opt/qflm/secrets/auth/platform-admin-password"
 
+SIGNING_CONTAINER="qflm-signing"
+SIGNING_TOKEN_TARGET="/run/qflm-signing/token"
+
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP="/opt/qflm/backups/recovery7k2-production-$STAMP"
 REPORT="$BACKUP/recovery7k2-production-report.txt"
@@ -119,6 +122,35 @@ if [ -n "$DB_ENV" ] && [ "$DB_ENV" != "$PROD_DB" ]; then
     die "production API environment points to unexpected database: $DB_ENV"
 fi
 
+echo
+echo "=== 3A. RESOLVE OFFLINE SIGNING TOKEN ==="
+
+[ "$(docker inspect "$SIGNING_CONTAINER" --format='{{.State.Running}}' 2>/dev/null || echo false)" = true ] \
+ || die "signing container not running"
+
+SIGNING_TOKEN_CONTAINER_PATH=$(docker inspect "$SIGNING_CONTAINER" \
+ --format='{{range .Config.Env}}{{println .}}{{end}}' \
+ | awk -F= '$1=="Signing__TokenPath"{print $2; exit}')
+
+[ -n "$SIGNING_TOKEN_CONTAINER_PATH" ] || die "Signing__TokenPath missing"
+
+SIGNING_TOKEN_SOURCE=$(docker inspect "$SIGNING_CONTAINER" \
+ --format='{{range .Mounts}}{{println .Source "|" .Destination}}{{end}}' \
+ | awk -F'|' -v target="$SIGNING_TOKEN_CONTAINER_PATH" '$2==target{print $1; exit}')
+
+if [ -z "$SIGNING_TOKEN_SOURCE" ]; then
+    SIGNING_TOKEN_SOURCE="/opt/qflm/secrets/signing-runtime/token"
+fi
+
+[ -s "$SIGNING_TOKEN_SOURCE" ] || die "signing token source missing"
+
+cat >> "$ENV_FILE" <<EOF
+OfflineSigning__BaseUrl=http://qflm-signing:8080
+OfflineSigning__TokenPath=$SIGNING_TOKEN_TARGET
+EOF
+chmod 600 "$ENV_FILE"
+
+echo "offline_signing_environment=PASS"
 echo "production_environment_capture=PASS"
 
 echo
@@ -127,7 +159,7 @@ echo "=== 4. START NEXT PRODUCTION API PRIVATELY ==="
 docker rm -f "$NEXT_API" >/dev/null 2>&1 || true
 docker rm -f "$ROLLBACK_API" >/dev/null 2>&1 || true
 
-docker run -d  --name "$NEXT_API"  --network "$NET"  --network-alias qflm-api-production-next  --env-file "$ENV_FILE"  --volumes-from "$PROD_API:ro"  --read-only  --cap-drop ALL  --security-opt no-new-privileges:true  --tmpfs /tmp:rw,noexec,nosuid,size=16m  "$PRODUCTION_IMAGE" >/dev/null  || die "next production API start failed"
+docker run -d  --name "$NEXT_API"  --network "$NET"  --network-alias qflm-api-production-next  --env-file "$ENV_FILE"  --volumes-from "$PROD_API:ro"  --mount type=bind,src="$SIGNING_TOKEN_SOURCE",dst="$SIGNING_TOKEN_TARGET",readonly  --read-only  --cap-drop ALL  --security-opt no-new-privileges:true  --tmpfs /tmp:rw,noexec,nosuid,size=16m  "$PRODUCTION_IMAGE" >/dev/null  || die "next production API start failed"
 
 sleep 5
 
@@ -186,8 +218,15 @@ declare -a URLS=(
 )
 
 for url in "${URLS[@]}"; do
-    CODE=$(docker run --rm --network "$NET" curlimages/curl:8.16.0       -s -o /dev/null -w '%{http_code}'       -H "Authorization: Bearer $TOKEN"       "http://$NEXT_API:8080$url")
-    [ "$CODE" = 200 ] || die "candidate API validation failed: $url -> $CODE"
+    CODE=$(docker run --rm --network "$NET" curlimages/curl:8.16.0 \
+      -s -o /dev/null -w '%{http_code}' \
+      -H "Authorization: Bearer $TOKEN" \
+      "http://$NEXT_API:8080$url")
+    if [ "$CODE" != 200 ]; then
+        echo "candidate_api_failure_url=$url http=$CODE"
+        docker logs --tail 240 "$NEXT_API" || true
+        die "candidate API validation failed: $url -> $CODE"
+    fi
 done
 
 REVOKE_JSON=$(python3 - "$REFRESH" <<'PY'

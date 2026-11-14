@@ -111,9 +111,6 @@ do
     [ -s "$f" ] || die "required source missing: $f"
 done
 
-grep -Fq '"audit.read"' <(docker exec "$PG" psql -U qflm -d "$PROD_DB" -tAc "SELECT code FROM auth_permissions WHERE code='audit.read';")  || die "audit.read permission missing"
-grep -Fq '"reports.read"' <(docker exec "$PG" psql -U qflm -d "$PROD_DB" -tAc "SELECT code FROM auth_permissions WHERE code='reports.read';")  || true
-
 AUDIT_PERMISSION=$(docker exec "$PG" psql -U qflm -d "$PROD_DB" -tAc "SELECT count(*) FROM auth_permissions WHERE code='audit.read';" | xargs)
 REPORT_PERMISSION=$(docker exec "$PG" psql -U qflm -d "$PROD_DB" -tAc "SELECT count(*) FROM auth_permissions WHERE code='reports.read';" | xargs)
 [ "$AUDIT_PERMISSION" = 1 ] || die "audit.read permission missing"
